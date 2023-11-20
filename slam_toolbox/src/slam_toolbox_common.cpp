@@ -310,7 +310,7 @@ karto::LaserRangeFinder* SlamToolbox::getLaser(const
 }
 
 /*****************************************************************************/
-bool SlamToolbox::updateMap()
+bool SlamToolbox::updateMap(bool deserialized)
 /*****************************************************************************/
 {
   if (sst_.getNumSubscribers() == 0)
@@ -318,6 +318,9 @@ bool SlamToolbox::updateMap()
     return true;
   }
   boost::mutex::scoped_lock lock(smapper_mutex_);
+  if (deserialized) {
+    smapper_->decayDeserializedScanWeight();
+  }
   karto::OccupancyGrid* occ_grid = smapper_->getOccupancyGrid(resolution_);
   if(!occ_grid)
   {
@@ -771,7 +774,7 @@ bool SlamToolbox::deserializePoseGraphCallback(
   ROS_DEBUG("DeserializePoseGraph: Successfully read file.");
 
   loadSerializedPoseGraph(mapper, dataset);
-  updateMap();
+  updateMap(true);
 
   first_measurement_ = true;
   boost::mutex::scoped_lock l(pose_mutex_);

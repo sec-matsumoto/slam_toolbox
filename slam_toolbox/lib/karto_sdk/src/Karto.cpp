@@ -139,9 +139,11 @@ namespace karto
   {
     kt_int8u* pDataPtr = m_pOccupancyGrid->GetDataPointer();
     kt_int32u* pCellPassCntPtr = m_pOccupancyGrid->m_pCellPassCnt->GetDataPointer();
+    kt_double* pCellPassWeightPtr = m_pOccupancyGrid->m_pCellPassWeight->GetDataPointer();
     kt_int32u* pCellHitCntPtr = m_pOccupancyGrid->m_pCellHitsCnt->GetDataPointer();
+    kt_double* pCellHitWeightPtr = m_pOccupancyGrid->m_pCellHitsWeight->GetDataPointer();
 
-    m_pOccupancyGrid->UpdateCell(&pDataPtr[index], pCellPassCntPtr[index], pCellHitCntPtr[index]);
+    m_pOccupancyGrid->UpdateCell(&pDataPtr[index], pCellPassCntPtr[index], pCellPassWeightPtr[index], pCellHitCntPtr[index], pCellHitWeightPtr[index]);
   }
 
   ////////////////////////////////////////////////////////////////////////////////////////

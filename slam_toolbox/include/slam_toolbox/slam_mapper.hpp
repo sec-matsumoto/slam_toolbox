@@ -58,6 +58,9 @@ public:
 
   void clearLocalizationBuffer();
 
+  void decayDeserializedScanWeight();
+  double previous_scan_decay_rate_;
+
 protected:
   std::unique_ptr<karto::Mapper> mapper_;
 };

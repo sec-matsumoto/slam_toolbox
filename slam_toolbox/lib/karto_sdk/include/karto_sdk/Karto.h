@@ -4944,7 +4944,9 @@ namespace karto
      * @param y1
      * @param f
      */
-    void TraceLine(kt_int32s x0, kt_int32s y0, kt_int32s x1, kt_int32s y1, Functor* f = NULL)
+    void TraceLine(kt_int32s x0, kt_int32s y0, kt_int32s x1, kt_int32s y1,
+                   Grid<kt_int32u>* gen_grid, Grid<kt_double>* pass_weight_grid, Grid<kt_double>* hit_weight_grid,
+                   kt_int32u gen, kt_double decay_rate, Functor* f = NULL)
     {
       kt_bool steep = abs(y1 - y0) > abs(x1 - x0);
       if (steep)
@@ -5001,7 +5003,21 @@ namespace karto
         {
           kt_int32s index = GridIndex(gridIndex, false);
           T* pGridPointer = GetDataPointer();
+          kt_double* pPassWeightPointer = pass_weight_grid->GetDataPointer();
+          kt_double* pHitWeightPointer = hit_weight_grid->GetDataPointer();
+          kt_int32u* pGenPointer = gen_grid->GetDataPointer();
           pGridPointer[index]++;
+
+          kt_int32u latest_gen = pGenPointer[index];
+          if (gen < latest_gen) {
+            kt_int32u gen_diff = latest_gen - gen;
+            pPassWeightPointer[index] *= std::pow(decay_rate, gen_diff);
+            pHitWeightPointer[index] *= std::pow(decay_rate, gen_diff);
+            pGenPointer[index] = gen;
+            latest_gen = gen;
+          }
+
+          pPassWeightPointer[index] += std::pow(decay_rate, gen - latest_gen);
 
           if (f != NULL)
           {
@@ -5738,6 +5754,14 @@ namespace karto
       }
     }
 
+    inline kt_int32u GetPreviousCount() {
+      return m_PreviousCount;
+    }
+
+    inline void SetPreviousCount(kt_int32u count) {
+      m_PreviousCount = count;
+    }
+
   private:
     /**
      * Compute point readings based on range readings
@@ -5825,6 +5849,7 @@ namespace karto
       ar & BOOST_SERIALIZATION_NVP(m_UnfilteredPointReadings);
       ar & BOOST_SERIALIZATION_NVP(m_BoundingBox);
       ar & BOOST_SERIALIZATION_NVP(m_IsDirty);
+      ar & BOOST_SERIALIZATION_NVP(m_PreviousCount);
       ar & BOOST_SERIALIZATION_BASE_OBJECT_NVP(LaserRangeScan);
     }
 
@@ -5869,6 +5894,8 @@ namespace karto
      * Internal flag used to update point readings, barycenter and bounding box
      */
     kt_bool m_IsDirty;
+
+    kt_int32u m_PreviousCount = 0;
   };  // LocalizedRangeScan
 
   /**
@@ -6019,7 +6046,10 @@ namespace karto
     OccupancyGrid(kt_int32s width, kt_int32s height, const Vector2<kt_double>& rOffset, kt_double resolution)
       : Grid<kt_int8u>(width, height)
       , m_pCellPassCnt(Grid<kt_int32u>::CreateGrid(0, 0, resolution))
+      , m_pCellPassWeight(Grid<kt_double>::CreateGrid(0, 0, resolution))
       , m_pCellHitsCnt(Grid<kt_int32u>::CreateGrid(0, 0, resolution))
+      , m_pCellHitsWeight(Grid<kt_double>::CreateGrid(0, 0, resolution))
+      , m_pCellLatestGen(Grid<kt_int32u>::CreateGrid(0, 0, resolution))
       , m_pCellUpdater(NULL)
     {
       m_pCellUpdater = new CellUpdater(this);
@@ -6031,6 +6061,7 @@ namespace karto
 
       m_pMinPassThrough = new Parameter<kt_int32u>("MinPassThrough", 2);
       m_pOccupancyThreshold = new Parameter<kt_double>("OccupancyThreshold", 0.1);
+      m_pPreviousScanDecayRate = new Parameter<kt_double>("PreviousScanDecayRate", 1.0);
 
       GetCoordinateConverter()->SetScale(1.0 / resolution);
       GetCoordinateConverter()->SetOffset(rOffset);
@@ -6044,10 +6075,14 @@ namespace karto
       delete m_pCellUpdater;
 
       delete m_pCellPassCnt;
+      delete m_pCellPassWeight;
       delete m_pCellHitsCnt;
+      delete m_pCellHitsWeight;
+      delete m_pCellLatestGen;
 
       delete m_pMinPassThrough;
       delete m_pOccupancyThreshold;
+      delete m_pPreviousScanDecayRate;
     }
 
   public:
@@ -6056,7 +6091,7 @@ namespace karto
      * @param rScans
      * @param resolution
      */
-    static OccupancyGrid* CreateFromScans(const LocalizedRangeScanVector& rScans, kt_double resolution)
+    static OccupancyGrid* CreateFromScans(const LocalizedRangeScanVector& rScans, kt_double resolution, kt_double previous_scan_decay_rate = 1.0)
     {
       if (rScans.empty())
       {
@@ -6067,9 +6102,29 @@ namespace karto
       Vector2<kt_double> offset;
       ComputeDimensions(rScans, resolution, width, height, offset);
       OccupancyGrid* pOccupancyGrid = new OccupancyGrid(width, height, offset, resolution);
+      pOccupancyGrid->SetPreviousScanDecayRate(previous_scan_decay_rate);
       pOccupancyGrid->CreateFromScans(rScans);
 
       return pOccupancyGrid;
+    }
+
+    static void DecayDeserializedScanWeight(const LocalizedRangeScanVector& rScans) {
+      if (rScans.empty())
+      {
+        return;
+      }
+
+      const_forEach(LocalizedRangeScanVector, &rScans)
+      {
+        if (*iter == nullptr)
+        {
+          continue;
+        }
+
+        LocalizedRangeScan* pScan = *iter;
+        kt_double previous_count = pScan->GetPreviousCount();
+        pScan->SetPreviousCount(previous_count + 1);
+      }
     }
 
     /**
@@ -6086,7 +6141,10 @@ namespace karto
 
       pOccupancyGrid->GetCoordinateConverter()->SetSize(GetCoordinateConverter()->GetSize());
       pOccupancyGrid->m_pCellPassCnt = m_pCellPassCnt->Clone();
+      pOccupancyGrid->m_pCellPassWeight = m_pCellPassWeight->Clone();
       pOccupancyGrid->m_pCellHitsCnt = m_pCellHitsCnt->Clone();
+      pOccupancyGrid->m_pCellHitsWeight = m_pCellHitsWeight->Clone();
+      pOccupancyGrid->m_pCellLatestGen = m_pCellLatestGen->Clone();
 
       return pOccupancyGrid;
     }
@@ -6173,6 +6231,11 @@ namespace karto
       m_pOccupancyThreshold->SetValue(thresh);
     }
 
+    void SetPreviousScanDecayRate(kt_double rate)
+    {
+      m_pPreviousScanDecayRate->SetValue(rate);
+    }
+
   protected:
     /**
      * Get cell hit grid
@@ -6182,6 +6245,10 @@ namespace karto
     {
       return m_pCellHitsCnt;
     }
+    virtual Grid<kt_double>* GetCellHitsWeights()
+    {
+      return m_pCellHitsWeight;
+    }
 
     /**
      * Get cell pass grid
@@ -6190,6 +6257,15 @@ namespace karto
     virtual Grid<kt_int32u>* GetCellPassCounts()
     {
       return m_pCellPassCnt;
+    }
+    virtual Grid<kt_double>* GetCellPassWeights()
+    {
+      return m_pCellPassWeight;
+    }
+
+    virtual Grid<kt_int32u>* GetCellLatestGen()
+    {
+      return m_pCellLatestGen;
     }
 
   protected:
@@ -6235,9 +6311,22 @@ namespace karto
     {
       m_pCellPassCnt->Resize(GetWidth(), GetHeight());
       m_pCellPassCnt->GetCoordinateConverter()->SetOffset(GetCoordinateConverter()->GetOffset());
+      m_pCellPassWeight->Resize(GetWidth(), GetHeight());
+      m_pCellPassWeight->GetCoordinateConverter()->SetOffset(GetCoordinateConverter()->GetOffset());
 
       m_pCellHitsCnt->Resize(GetWidth(), GetHeight());
       m_pCellHitsCnt->GetCoordinateConverter()->SetOffset(GetCoordinateConverter()->GetOffset());
+      m_pCellHitsWeight->Resize(GetWidth(), GetHeight());
+      m_pCellHitsWeight->GetCoordinateConverter()->SetOffset(GetCoordinateConverter()->GetOffset());
+
+      m_pCellLatestGen->Resize(GetWidth(), GetHeight());
+      m_pCellLatestGen->GetCoordinateConverter()->SetOffset(GetCoordinateConverter()->GetOffset());
+      kt_int32u* pCellLatestGenPtr = m_pCellLatestGen->GetDataPointer();
+      kt_int32u nBytes = GetDataSize();
+      for (kt_int32u i = 0; i < nBytes; i++, pCellLatestGenPtr++)
+      {
+        *pCellLatestGenPtr = std::pow(2, 32) - 1;
+      }
 
       const_forEach(LocalizedRangeScanVector, &rScans)
       {
@@ -6266,6 +6355,8 @@ namespace karto
       kt_double rangeThreshold = laserRangeFinder->GetRangeThreshold();
       kt_double maxRange = laserRangeFinder->GetMaximumRange();
       kt_double minRange = laserRangeFinder->GetMinimumRange();
+
+      kt_int32u gen = pScan->GetPreviousCount();
 
       Vector2<kt_double> scanPosition = pScan->GetSensorPose().GetPosition();
       // get scan point readings
@@ -6297,7 +6388,7 @@ namespace karto
           point.SetY(scanPosition.GetY() + ratio * dy);
         }
 
-        kt_bool isInMap = RayTrace(scanPosition, point, isEndPointValid, doUpdate);
+        kt_bool isInMap = RayTrace(scanPosition, point, isEndPointValid, gen, doUpdate);
         if (!isInMap)
         {
           isAllInMap = false;
@@ -6316,11 +6407,13 @@ namespace karto
      * @param rWorldTo end position of beam
      * @param isEndPointValid is the reading within the range threshold?
      * @param doUpdate whether to update the cells' occupancy status immediately
+     * @param gen
      * @return returns false if an endpoint fell off the grid, otherwise true
      */
     virtual kt_bool RayTrace(const Vector2<kt_double>& rWorldFrom,
                              const Vector2<kt_double>& rWorldTo,
                              kt_bool isEndPointValid,
+                             kt_int32u gen,
                              kt_bool doUpdate = false)
     {
       assert(m_pCellPassCnt != NULL && m_pCellHitsCnt != NULL);
@@ -6328,8 +6421,11 @@ namespace karto
       Vector2<kt_int32s> gridFrom = m_pCellPassCnt->WorldToGrid(rWorldFrom);
       Vector2<kt_int32s> gridTo = m_pCellPassCnt->WorldToGrid(rWorldTo);
 
+      kt_double decay_rate = m_pPreviousScanDecayRate->GetValue();
+
       CellUpdater* pCellUpdater = doUpdate ? m_pCellUpdater : NULL;
-      m_pCellPassCnt->TraceLine(gridFrom.GetX(), gridFrom.GetY(), gridTo.GetX(), gridTo.GetY(), pCellUpdater);
+      m_pCellPassCnt->TraceLine(gridFrom.GetX(), gridFrom.GetY(), gridTo.GetX(), gridTo.GetY(),
+                                m_pCellLatestGen, m_pCellPassWeight, m_pCellHitsWeight, gen, decay_rate, pCellUpdater);
 
       // for the end point
       if (isEndPointValid)
@@ -6339,11 +6435,26 @@ namespace karto
           kt_int32s index = m_pCellPassCnt->GridIndex(gridTo, false);
 
           kt_int32u* pCellPassCntPtr = m_pCellPassCnt->GetDataPointer();
+          kt_double* pCellPassWeightPtr = m_pCellPassWeight->GetDataPointer();
           kt_int32u* pCellHitCntPtr = m_pCellHitsCnt->GetDataPointer();
+          kt_double* pCellHitWeightPtr = m_pCellHitsWeight->GetDataPointer();
+          kt_int32u* pCellLatestGenPtr = m_pCellLatestGen->GetDataPointer();
 
           // increment cell pass through and hit count
           pCellPassCntPtr[index]++;
           pCellHitCntPtr[index]++;
+
+          kt_int32u latest_gen = pCellLatestGenPtr[index];
+          if (gen < latest_gen) {
+            kt_int32u gen_diff = latest_gen - gen;
+            pCellPassWeightPtr[index] *= std::pow(decay_rate, gen_diff);
+            pCellHitWeightPtr[index] *= std::pow(decay_rate, gen_diff);
+            pCellLatestGenPtr[index] = gen;
+            latest_gen = gen;
+          }
+
+          pCellPassWeightPtr[index] += std::pow(decay_rate, gen - latest_gen);
+          pCellHitWeightPtr[index] += std::pow(decay_rate, gen - latest_gen);
 
           if (doUpdate)
           {
@@ -6359,13 +6470,15 @@ namespace karto
      * Updates a single cell's value based on the given counters
      * @param pCell
      * @param cellPassCnt
+     * @param cellPassWeight
      * @param cellHitCnt
+     * @param cellHitWeight
      */
-    virtual void UpdateCell(kt_int8u* pCell, kt_int32u cellPassCnt, kt_int32u cellHitCnt)
+    virtual void UpdateCell(kt_int8u* pCell, kt_int32u cellPassCnt, kt_double cellPassWeight, kt_int32u cellHitCnt, kt_double cellHitWeight)
     {
       if (cellPassCnt > m_pMinPassThrough->GetValue())
       {
-        kt_double hitRatio = static_cast<kt_double>(cellHitCnt) / static_cast<kt_double>(cellPassCnt);
+        kt_double hitRatio = cellHitWeight / cellPassWeight;
 
         if (hitRatio > m_pOccupancyThreshold->GetValue())
         {
@@ -6391,12 +6504,14 @@ namespace karto
       // set occupancy status of cells
       kt_int8u* pDataPtr = GetDataPointer();
       kt_int32u* pCellPassCntPtr = m_pCellPassCnt->GetDataPointer();
+      kt_double* pCellPassWeightPtr = m_pCellPassWeight->GetDataPointer();
       kt_int32u* pCellHitCntPtr = m_pCellHitsCnt->GetDataPointer();
+      kt_double* pCellHitWeightPtr = m_pCellHitsWeight->GetDataPointer();
 
       kt_int32u nBytes = GetDataSize();
-      for (kt_int32u i = 0; i < nBytes; i++, pDataPtr++, pCellPassCntPtr++, pCellHitCntPtr++)
+      for (kt_int32u i = 0; i < nBytes; i++, pDataPtr++, pCellPassCntPtr++, pCellPassWeightPtr++, pCellHitCntPtr++, pCellHitWeightPtr++)
       {
-        UpdateCell(pDataPtr, *pCellPassCntPtr, *pCellHitCntPtr);
+        UpdateCell(pDataPtr, *pCellPassCntPtr, *pCellPassWeightPtr, *pCellHitCntPtr, *pCellHitWeightPtr);
       }
     }
 
@@ -6409,7 +6524,10 @@ namespace karto
     {
       Grid<kt_int8u>::Resize(width, height);
       m_pCellPassCnt->Resize(width, height);
+      m_pCellPassWeight->Resize(width, height);
       m_pCellHitsCnt->Resize(width, height);
+      m_pCellHitsWeight->Resize(width, height);
+      m_pCellLatestGen->Resize(width, height);
     }
 
   protected:
@@ -6417,11 +6535,15 @@ namespace karto
      * Counters of number of times a beam passed through a cell
      */
     Grid<kt_int32u>* m_pCellPassCnt;
+    Grid<kt_double>* m_pCellPassWeight;
 
     /**
      * Counters of number of times a beam ended at a cell
      */
     Grid<kt_int32u>* m_pCellHitsCnt;
+    Grid<kt_double>* m_pCellHitsWeight;
+
+    Grid<kt_int32u>* m_pCellLatestGen;
 
   private:
     /**
@@ -6447,6 +6569,9 @@ namespace karto
 
     // Minimum ratio of beams hitting cell to beams passing through cell for cell to be marked as occupied
     Parameter<kt_double>* m_pOccupancyThreshold;
+
+    Parameter<kt_double>* m_pPreviousScanDecayRate;
+
   };  // OccupancyGrid
 
   ////////////////////////////////////////////////////////////////////////////////////////

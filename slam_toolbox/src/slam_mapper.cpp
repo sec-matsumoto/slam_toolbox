@@ -64,7 +64,7 @@ karto::OccupancyGrid* SMapper::getOccupancyGrid(const double& resolution)
 {
   karto::OccupancyGrid* occ_grid = nullptr;
   return karto::OccupancyGrid::CreateFromScans(mapper_->GetAllProcessedScans(),
-    resolution);
+    resolution, previous_scan_decay_rate_);
 }
 
 /*****************************************************************************/
@@ -275,6 +275,9 @@ void SMapper::configure(const ros::NodeHandle& nh)
   {
     mapper_->setParamUseResponseExpansion(use_response_expansion);
   }
+
+  nh.param("previous_scan_decay_rate", previous_scan_decay_rate_, 1.0);
+
   return;
 }
 
@@ -284,6 +287,10 @@ void SMapper::Reset()
 {
   mapper_->Reset();
   return;
+}
+
+void SMapper::decayDeserializedScanWeight() {
+  karto::OccupancyGrid::DecayDeserializedScanWeight(mapper_->GetAllProcessedScans());
 }
 
 } // end namespace
